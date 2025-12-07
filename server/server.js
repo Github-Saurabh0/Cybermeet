@@ -11,38 +11,25 @@ dotenv.config();
 connectDB();
 
 const app = express();
-
-// CORS Protection
-app.use(
-  cors({
-    origin: process.env.CLIENT_ORIGIN,
-    credentials: true,
-    methods: ["GET", "POST"],
-  })
-);
-
+app.use(cors({ origin: process.env.CLIENT_ORIGIN, credentials: true }));
 app.use(express.json());
 
-// Health Check API
 app.get("/", (_req, res) => {
-  res.send("CyberMeet Server is Running 🚀");
+  res.send("Meet & Chat Portal API running");
 });
 
-// APIs
 app.use("/api/auth", authRoutes);
 app.use("/api/rooms", roomRoutes);
 
 const server = http.createServer(app);
 
-// Socket.io Config
 const io = new Server(server, {
   cors: {
     origin: process.env.CLIENT_ORIGIN,
-    methods: ["GET", "POST"],
-  },
+    methods: ["GET", "POST"]
+  }
 });
 
-// Store Room Users in Memory
 const roomUsers = {};
 
 io.on("connection", (socket) => {
@@ -58,7 +45,7 @@ io.on("connection", (socket) => {
 
     socket.to(roomId).emit("user-joined", {
       socketId: socket.id,
-      userName,
+      userName
     });
 
     io.to(roomId).emit("room-users", roomUsers[roomId]);
@@ -69,9 +56,8 @@ io.on("connection", (socket) => {
       socketId: socket.id,
       userName: socket.data.userName,
       message,
-      createdAt: new Date().toISOString(),
+      createdAt: new Date().toISOString()
     };
-
     io.to(roomId).emit("receive-message", payload);
   });
 
@@ -79,12 +65,12 @@ io.on("connection", (socket) => {
     socket.to(roomId).emit("user-typing", {
       socketId: socket.id,
       userName: socket.data.userName,
-      isTyping,
+      isTyping
     });
   });
 
-  // WebRTC Signaling
-  socket.on("webrtc-offer", ({ to, offer }) => {
+  // WebRTC signaling
+  socket.on("webrtc-offer", ({ roomId, to, offer }) => {
     io.to(to).emit("webrtc-offer", { from: socket.id, offer });
   });
 
@@ -96,19 +82,18 @@ io.on("connection", (socket) => {
     io.to(to).emit("webrtc-ice-candidate", { from: socket.id, candidate });
   });
 
-  // Handle User Disconnect
   socket.on("disconnect", () => {
     const roomId = socket.data.roomId;
     const userName = socket.data.userName;
 
     if (roomId && roomUsers[roomId]) {
       roomUsers[roomId] = roomUsers[roomId].filter(
-        (user) => user.socketId !== socket.id
+        (u) => u.socketId !== socket.id
       );
 
       socket.to(roomId).emit("user-left", {
         socketId: socket.id,
-        userName,
+        userName
       });
 
       io.to(roomId).emit("room-users", roomUsers[roomId]);
@@ -124,5 +109,5 @@ io.on("connection", (socket) => {
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
-  console.log(`CyberMeet Backend running on port ${PORT} 🎯`);
+  console.log(`Server running on port ${PORT}`);
 });
