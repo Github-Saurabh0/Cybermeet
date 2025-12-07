@@ -14,18 +14,17 @@ const app = express();
 
 // ALLOWED CORS ORIGINS
 const allowedOrigins = [
-  "http://localhost:5173",
-  "https://cybermeet.wearl.co.in",
+  "https://cybermeet.wearl.co.in",  // Your frontend domain
+  "https://cybermeet-5nmt.onrender.com", // Self-origin for testing
+  "http://localhost:5173", // Local dev
   process.env.CLIENT_ORIGIN
 ];
 
-app.use(
-  cors({
-    origin: allowedOrigins,
-    credentials: true,
-    methods: ["GET", "POST"],
-  })
-);
+app.use(cors({
+  origin: allowedOrigins,
+  credentials: true,
+  methods: ["GET", "POST"],
+}));
 
 app.use(express.json());
 
@@ -121,6 +120,7 @@ io.on("connection", (socket) => {
     console.log("Client disconnected:", socket.id);
   });
 });
+
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
