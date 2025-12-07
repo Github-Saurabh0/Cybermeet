@@ -5,18 +5,21 @@ import { useAuth } from "./AuthContext.jsx";
 const SocketContext = createContext(null);
 
 export const SocketProvider = ({ children }) => {
-  const { API_BASE } = useAuth() || {};
+  const { API_BASE, token } = useAuth() || {};
   const [socket, setSocket] = useState(null);
 
   useEffect(() => {
     if (!API_BASE) return;
-    const base = API_BASE.replace("/api", "");
-    const s = io(base, { transports: ["websocket", "polling"] });
+    const s = io(API_BASE, {
+      transports: ["websocket", "polling"],
+      auth: { token }
+    });
     setSocket(s);
+
     return () => {
       s.disconnect();
     };
-  }, [API_BASE]);
+  }, [API_BASE, token]);
 
   const value = useMemo(() => ({ socket }), [socket]);
   return (
