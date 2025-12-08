@@ -8,220 +8,173 @@ const ICE_CONFIG = {
 const VideoRoom = ({ roomId, userName }) => {
   const { socket } = useSocket();
   const localVideoRef = useRef(null);
-  const [localStream, setLocalStream] = useState(null);
   const [remoteStreams, setRemoteStreams] = useState({});
-  const [isScreenSharing, setIsScreenSharing] = useState(false);
-
-  // peers ko ref me rakhenge (no re-render)
+  const [localStream, setLocalStream] = useState(null);
   const peersRef = useRef({});
   const joinedRef = useRef(false);
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
 
-  // 1) Camera/Mic access
+  // Force mobile playback unlock
+  useEffect(() => {
+    const unlock = () => {
+      document.querySelectorAll("video").forEach(v => {
+        v.muted = false;
+        v.play().catch(() => {});
+      });
+      document.body.removeEventListener("touchstart", unlock);
+    };
+    document.body.addEventListener("touchstart", unlock, { once: true });
+  }, []);
+
+  // Get camera + mic
   useEffect(() => {
     const startMedia = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
           audio: true,
+          video: true,
         });
         setLocalStream(stream);
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
         }
       } catch (err) {
-        console.error("Media error:", err);
+        console.log("media error", err);
       }
     };
     startMedia();
   }, []);
 
-  // 2) WebRTC + Socket signalling
+  // Signaling and WebRTC
   useEffect(() => {
     if (!socket || !localStream) return;
 
-    // ensure join-room only once per socket
     if (!joinedRef.current) {
       socket.emit("join-room", { roomId, userName });
       joinedRef.current = true;
     }
 
-    const createPeer = (remoteSocketId, isInitiator) => {
+    const createPeer = (remoteId, initiator) => {
       const pc = new RTCPeerConnection(ICE_CONFIG);
 
-      // add local tracks
       localStream.getTracks().forEach((track) => {
         pc.addTrack(track, localStream);
       });
 
-      // ICE candidates
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
+      pc.onicecandidate = ({ candidate }) => {
+        if (candidate) {
           socket.emit("webrtc-ice-candidate", {
-            to: remoteSocketId,
-            candidate: event.candidate,
+            to: remoteId,
+            candidate,
           });
         }
       };
 
-      // Remote track
-      pc.ontrack = (event) => {
-        const remoteStream = event.streams[0];
+      pc.ontrack = ({ streams }) => {
+        const stream = streams[0];
         setRemoteStreams((prev) => ({
           ...prev,
-          [remoteSocketId]: remoteStream,
+          [remoteId]: stream,
         }));
       };
 
-      // Only initiator creates offer
-      if (isInitiator) {
-        const makeOffer = async () => {
-          try {
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            socket.emit("webrtc-offer", {
-              roomId,
-              to: remoteSocketId,
-              offer,
-            });
-          } catch (err) {
-            console.error("Offer error:", err);
-          }
+      if (initiator) {
+        pc.onnegotiationneeded = async () => {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+
+          socket.emit("webrtc-offer", {
+            roomId,
+            to: remoteId,
+            offer,
+          });
         };
-        // negotiationneeded multiple times aa sakta, but safe hai
-        pc.onnegotiationneeded = makeOffer;
       }
 
       return pc;
     };
 
-    const handleUserJoined = ({ socketId }) => {
-      // existing clients initiator banenge
-      if (peersRef.current[socketId]) return;
-      const peer = createPeer(socketId, true);
-      peersRef.current[socketId] = peer;
-    };
+    socket.on("user-joined", ({ socketId }) => {
+      const pc = createPeer(socketId, true);
+      peersRef.current[socketId] = pc;
+    });
 
-    const handleOffer = async ({ from, offer }) => {
-      let peer = peersRef.current[from];
-      if (!peer) {
-        peer = createPeer(from, false);
-        peersRef.current[from] = peer;
-      }
-      try {
-        await peer.setRemoteDescription(new RTCSessionDescription(offer));
-        const answer = await peer.createAnswer();
-        await peer.setLocalDescription(answer);
-        socket.emit("webrtc-answer", { to: from, answer });
-      } catch (err) {
-        console.error("Handle offer error:", err);
-      }
-    };
+    socket.on("webrtc-offer", async ({ from, offer }) => {
+      const pc = createPeer(from, false);
+      peersRef.current[from] = pc;
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      socket.emit("webrtc-answer", { to: from, answer });
+    });
 
-    const handleAnswer = async ({ from, answer }) => {
-      const peer = peersRef.current[from];
-      if (!peer) return;
-      try {
-        await peer.setRemoteDescription(new RTCSessionDescription(answer));
-      } catch (err) {
-        console.error("Handle answer error:", err);
-      }
-    };
+    socket.on("webrtc-answer", async ({ from, answer }) => {
+      const pc = peersRef.current[from];
+      if (!pc) return;
+      await pc.setRemoteDescription(new RTCSessionDescription(answer));
+    });
 
-    const handleCandidate = async ({ from, candidate }) => {
-      const peer = peersRef.current[from];
-      if (!peer) return;
-      try {
-        await peer.addIceCandidate(new RTCIceCandidate(candidate));
-      } catch (err) {
-        console.error("ICE error:", err);
-      }
-    };
+    socket.on("webrtc-ice-candidate", ({ from, candidate }) => {
+      const pc = peersRef.current[from];
+      if (!pc) return;
+      pc.addIceCandidate(new RTCIceCandidate(candidate));
+    });
 
-    const handleUserLeft = ({ socketId }) => {
-      const peer = peersRef.current[socketId];
-      if (peer) {
-        peer.close();
-        delete peersRef.current[socketId];
-      }
+    socket.on("user-left", ({ socketId }) => {
+      const pc = peersRef.current[socketId];
+      if (pc) pc.close();
+      delete peersRef.current[socketId];
       setRemoteStreams((prev) => {
         const copy = { ...prev };
         delete copy[socketId];
         return copy;
       });
-    };
-
-    socket.on("user-joined", handleUserJoined);
-    socket.on("webrtc-offer", handleOffer);
-    socket.on("webrtc-answer", handleAnswer);
-    socket.on("webrtc-ice-candidate", handleCandidate);
-    socket.on("user-left", handleUserLeft);
-
-    return () => {
-      socket.off("user-joined", handleUserJoined);
-      socket.off("webrtc-offer", handleOffer);
-      socket.off("webrtc-answer", handleAnswer);
-      socket.off("webrtc-ice-candidate", handleCandidate);
-      socket.off("user-left", handleUserLeft);
-    };
+    });
   }, [socket, localStream, roomId, userName]);
 
-  // 3) Screen share logic same, bas peersRef use karo
-  const handleScreenShareToggle = async () => {
-    if (!localStream) return;
+  const toggleScreen = async () => {
     if (!isScreenSharing) {
-      try {
-        const screenStream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-        });
-        const screenTrack = screenStream.getVideoTracks()[0];
-
-        Object.values(peersRef.current).forEach((pc) => {
-          const sender = pc
-            .getSenders()
-            .find((s) => s.track && s.track.kind === "video");
-          if (sender) sender.replaceTrack(screenTrack);
-        });
-
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = screenStream;
-        }
-
-        screenTrack.onended = () => stopScreenShare();
-        setIsScreenSharing(true);
-      } catch (err) {
-        console.error("Screen share error:", err);
+      if (!navigator.mediaDevices.getDisplayMedia) {
+        alert("Screen Share not supported on this device!");
+        return;
       }
-    } else {
-      stopScreenShare();
-    }
+      const sstream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+      });
+      const track = sstream.getVideoTracks()[0];
+
+      Object.values(peersRef.current).forEach((pc) => {
+        const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+        sender && sender.replaceTrack(track);
+      });
+
+      localVideoRef.current.srcObject = sstream;
+
+      track.onended = () => stopScreen();
+      setIsScreenSharing(true);
+    } else stopScreen();
   };
 
-  const stopScreenShare = () => {
-    if (!localStream) return;
-    const camTrack = localStream.getVideoTracks()[0];
-
+  const stopScreen = () => {
+    const camTrack = localStream?.getVideoTracks()[0];
     Object.values(peersRef.current).forEach((pc) => {
-      const sender = pc
-        .getSenders()
-        .find((s) => s.track && s.track.kind === "video");
-      if (sender) sender.replaceTrack(camTrack);
+      const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+      sender && sender.replaceTrack(camTrack);
     });
-
-    if (localVideoRef.current) {
-      localVideoRef.current.srcObject = localStream;
-    }
+    localVideoRef.current.srcObject = localStream;
     setIsScreenSharing(false);
   };
 
   return (
     <div className="video-room">
       <div className="video-header">
-        <h3>Meeting: {roomId}</h3>
-        <button onClick={handleScreenShareToggle}>
+        <button onClick={toggleScreen}>
           {isScreenSharing ? "Stop Share" : "Share Screen"}
         </button>
       </div>
+
       <div className="video-grid">
+        {/* Local */}
         <div className="video-tile">
           <video
             ref={localVideoRef}
@@ -230,33 +183,34 @@ const VideoRoom = ({ roomId, userName }) => {
             muted
             style={{ width: "100%", background: "#000" }}
           />
-          <p>You ({userName})</p>
+          <p>You</p>
         </div>
+
+        {/* Remote */}
         {Object.entries(remoteStreams).map(([id, stream]) => (
-          <RemoteVideo key={id} stream={stream} socketId={id} />
+          <RemoteVideo key={id} id={id} stream={stream} />
         ))}
       </div>
     </div>
   );
 };
 
-const RemoteVideo = ({ stream, socketId }) => {
+const RemoteVideo = ({ stream, id }) => {
   const ref = useRef(null);
   useEffect(() => {
-    if (ref.current) {
-      ref.current.srcObject = stream;
-    }
+    ref.current && (ref.current.srcObject = stream);
   }, [stream]);
-
   return (
     <div className="video-tile">
       <video
         ref={ref}
         autoPlay
         playsInline
+        // don't mute remote
+        muted={false}
         style={{ width: "100%", background: "#000" }}
       />
-      <p>{socketId}</p>
+      <p>{id}</p>
     </div>
   );
 };
